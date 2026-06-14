@@ -4,6 +4,7 @@
 #include <fstream>
 #include <set>
 #include <mutex>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
@@ -225,6 +226,9 @@ private:
   {
     const std::string & cmd = goal_handle->get_goal()->command;
     RCLCPP_INFO(this->get_logger(), "[execute] command: '%s'", cmd.c_str());
+
+    // Simulate action duration
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 
     {
       std::lock_guard<std::mutex> lock(robot_mutex_);
