@@ -13,7 +13,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(SFML 2.5 COMPONENTS graphics window system REQUIRED)
-find_package(behaviortree_cpp_v3 REQUIRED)
+find_package(behaviortree_cpp REQUIRED)
 
 # -- Generate the custom Move action ------------------------------------------
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -50,7 +50,7 @@ ament_target_dependencies(robot
   rclcpp
   rclcpp_action
   ament_index_cpp
-  behaviortree_cpp_v3
+  behaviortree_cpp
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target_robot ${PROJECT_NAME} "rosidl_typesupport_cpp")

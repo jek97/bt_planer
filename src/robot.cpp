@@ -10,8 +10,8 @@
 #include "bt_planner/action/move.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include <behaviortree_cpp_v3/bt_factory.h>
-#include <behaviortree_cpp_v3/action_node.h>
+#include <behaviortree_cpp/bt_factory.h>
+#include <behaviortree_cpp/action_node.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -62,7 +62,7 @@ public:
   using GoalHandle = rclcpp_action::ClientGoalHandle<Move>;
 
   MoveCommand(const std::string & name,
-              const BT::NodeConfiguration & config,
+              const BT::NodeConfig & config,
               rclcpp::Node::SharedPtr node,
               rclcpp_action::Client<Move>::SharedPtr client)
   : BT::StatefulActionNode(name, config),
@@ -211,13 +211,13 @@ int main(int argc, char * argv[])
   // --- Build the Behavior Tree ---
   BT::BehaviorTreeFactory factory;
 
-  factory.registerBuilder<MoveCommand>(
-    "MoveCommand",
-    [robot_node](const std::string & name, const BT::NodeConfiguration & config) {
+  BT::NodeBuilder move_builder =
+    [robot_node](const std::string & name, const BT::NodeConfig & config) {
       return std::make_unique<MoveCommand>(name, config,
                                            robot_node,
                                            robot_node->client());
-    });
+    };
+  factory.registerBuilder(BT::CreateManifest<MoveCommand>("MoveCommand"), move_builder);
 
   std::string tree_path =
     ament_index_cpp::get_package_share_directory("bt_planner")
@@ -232,7 +232,7 @@ int main(int argc, char * argv[])
   while (rclcpp::ok()) {
     rclcpp::spin_some(robot_node);
 
-    BT::NodeStatus status = tree.tickRoot();
+    BT::NodeStatus status = tree.tickOnce();
 
     if (status == BT::NodeStatus::FAILURE) {
       RCLCPP_WARN(robot_node->get_logger(), "Tree returned FAILURE. Stopping.");
