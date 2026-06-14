@@ -230,6 +230,8 @@ private:
     // Simulate action duration
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
+    bool success = true;
+
     {
       std::lock_guard<std::mutex> lock(robot_mutex_);
 
@@ -248,28 +250,30 @@ private:
         int nx = robot_.x + dx;
         int ny = robot_.y + dy;
 
-        bool in_bounds  = nx >= 0 && nx < env_.size_x &&
-                          ny >= 0 && ny < env_.size_y;
-        bool free_cell  = env_.obstacles.count({nx, ny}) == 0;
+        bool in_bounds = nx >= 0 && nx < env_.size_x &&
+                         ny >= 0 && ny < env_.size_y;
+        bool free_cell = env_.obstacles.count({nx, ny}) == 0;
 
         if (in_bounds && free_cell) {
           robot_.x = nx;
           robot_.y = ny;
         } else {
           RCLCPP_WARN(this->get_logger(),
-            "Move blocked at (%d,%d).", nx, ny);
+            "Move blocked at (%d,%d) – obstacle or out of bounds.", nx, ny);
+          success = false;
         }
       }
     }
 
     robot_.print_pose();
 
-    auto result   = std::make_shared<Move::Result>();
+    auto result     = std::make_shared<Move::Result>();
     {
       std::lock_guard<std::mutex> lock(robot_mutex_);
-      result->x     = robot_.x;
-      result->y     = robot_.y;
-      result->theta = robot_.theta;
+      result->x       = robot_.x;
+      result->y       = robot_.y;
+      result->theta   = robot_.theta;
+      result->success = success;
     }
     goal_handle->succeed(result);
   }
