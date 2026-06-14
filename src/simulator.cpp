@@ -3,6 +3,8 @@
 #include <thread>
 #include <fstream>
 #include <set>
+#include <mutex>
+#include <cmath>
 #include <stdexcept>
 
 #include "rclcpp/rclcpp.hpp"
@@ -10,16 +12,18 @@
 #include "bt_planner/action/move.hpp"
 
 #include <nlohmann/json.hpp>
-#include <opencv2/opencv.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+
+#include <SFML/Graphics.hpp>
 
 using json = nlohmann::json;
 
-// ---------------------------------------------
-//  Environment: grid size and obstacle set
-// ---------------------------------------------
-struct Cell { int x; int y; };
+static const int WINDOW_W = 1000;
+static const int WINDOW_H = 1000;
 
+// ---------------------------------------------
+//  Environment
+// ---------------------------------------------
 struct Environment
 {
   int size_x = 0;
@@ -41,84 +45,100 @@ Environment parse_environment(const std::string & path)
   env.size_y = j.at("size").at("y").get<int>();
 
   for (const auto & obs : j.at("obstacles")) {
-    int ox = obs.at("x").get<int>();
-    int oy = obs.at("y").get<int>();
-    env.obstacles.insert({ox, oy});
+    env.obstacles.insert({obs.at("x").get<int>(), obs.at("y").get<int>()});
   }
-
   return env;
 }
 
 // ---------------------------------------------
-//  Robot: holds the simulated pose
+//  Robot
 // ---------------------------------------------
 class Robot
 {
 public:
-  int x;
-  int y;
-  int theta;  // degrees: 0=up, 90=right, 180=down, 270=left
-
-  Robot() : x(0), y(0), theta(0) {}
+  int x     = 0;
+  int y     = 0;
+  int theta = 0;  // 0=up, 90=right, 180=down, 270=left
 
   void print_pose() const
   {
     RCLCPP_INFO(rclcpp::get_logger("Robot"),
-      "Pose: x=%d  y=%d  theta=%d deg", x, y, theta);
+      "Pose: x=%d  y=%d  theta=%d", x, y, theta);
   }
 };
 
 // ---------------------------------------------
-//  Visualization
+//  Rendering helpers
 // ---------------------------------------------
-static const int WINDOW_W = 1000;
-static const int WINDOW_H = 1000;
+static void draw_arrow(sf::RenderTarget & target,
+                       sf::Vector2f center, int theta, float size)
+{
+  // Convert theta to radians: 0=up means -π/2 in standard screen angle
+  float angle_rad;
+  switch (theta) {
+    case 0:   angle_rad = -M_PI / 2.f; break;  // up
+    case 90:  angle_rad = 0.f;          break;  // right
+    case 180: angle_rad = M_PI / 2.f;  break;  // down
+    default:  angle_rad = M_PI;         break;  // left (270)
+  }
 
-void draw_environment(const Environment & env, const Robot & robot)
+  sf::Vector2f dir(std::cos(angle_rad), std::sin(angle_rad));
+  sf::Vector2f perp(-dir.y, dir.x);
+
+  sf::Vector2f tip   = center + dir * size;
+  sf::Vector2f base  = center - dir * (size * 0.4f);
+  sf::Vector2f left  = base + perp * (size * 0.35f);
+  sf::Vector2f right = base - perp * (size * 0.35f);
+
+  sf::ConvexShape arrow(3);
+  arrow.setPoint(0, tip);
+  arrow.setPoint(1, left);
+  arrow.setPoint(2, right);
+  arrow.setFillColor(sf::Color::White);
+  target.draw(arrow);
+}
+
+void render_environment(sf::RenderTarget & target,
+                        const Environment & env,
+                        const Robot & robot)
 {
   if (env.size_x <= 0 || env.size_y <= 0) return;
 
-  int cell_w = WINDOW_W / env.size_x;
-  int cell_h = WINDOW_H / env.size_y;
+  float cell_w = static_cast<float>(WINDOW_W) / env.size_x;
+  float cell_h = static_cast<float>(WINDOW_H) / env.size_y;
 
-  cv::Mat img(WINDOW_H, WINDOW_W, CV_8UC3, cv::Scalar(255, 255, 255));
+  target.clear(sf::Color::White);
 
-  // Draw cells
   for (int gy = 0; gy < env.size_y; ++gy) {
     for (int gx = 0; gx < env.size_x; ++gx) {
-      int px = gx * cell_w;
-      // Flip y so row 0 is at bottom
-      int py = (env.size_y - 1 - gy) * cell_h;
-      cv::Rect cell_rect(px, py, cell_w, cell_h);
+      float px = gx * cell_w;
+      // Flip y: row 0 of the grid is at the bottom of the window
+      float py = (env.size_y - 1 - gy) * cell_h;
 
-      if (env.obstacles.count({gx, gy})) {
-        cv::rectangle(img, cell_rect, cv::Scalar(0, 0, 0), cv::FILLED);
-      } else if (gx == robot.x && gy == robot.y) {
-        cv::rectangle(img, cell_rect, cv::Scalar(0, 0, 220), cv::FILLED);
+      sf::RectangleShape cell(sf::Vector2f(cell_w - 1.f, cell_h - 1.f));
+      cell.setPosition(px, py);
 
-        // Arrow direction based on theta
-        // Center of cell in image coordinates
-        cv::Point center(px + cell_w / 2, py + cell_h / 2);
-        int arrow_len = std::min(cell_w, cell_h) * 2 / 5;
+      bool is_obstacle = env.obstacles.count({gx, gy}) > 0;
+      bool is_robot    = (gx == robot.x && gy == robot.y);
 
-        cv::Point tip;
-        if (robot.theta == 0)         tip = center + cv::Point(0, -arrow_len);   // up
-        else if (robot.theta == 90)   tip = center + cv::Point(arrow_len, 0);    // right
-        else if (robot.theta == 180)  tip = center + cv::Point(0, arrow_len);    // down
-        else                          tip = center + cv::Point(-arrow_len, 0);   // left (270)
-
-        cv::arrowedLine(img, center, tip, cv::Scalar(255, 255, 255), 2, cv::LINE_AA, 0, 0.4);
+      if (is_obstacle) {
+        cell.setFillColor(sf::Color::Black);
+      } else if (is_robot) {
+        cell.setFillColor(sf::Color::Red);
+      } else {
+        cell.setFillColor(sf::Color::White);
       }
+      cell.setOutlineColor(sf::Color(180, 180, 180));
+      cell.setOutlineThickness(1.f);
+      target.draw(cell);
 
-      // Grid lines
-      cv::rectangle(img, cell_rect, cv::Scalar(180, 180, 180), 1);
+      if (is_robot) {
+        sf::Vector2f center(px + cell_w / 2.f, py + cell_h / 2.f);
+        draw_arrow(target, center, robot.theta,
+                   std::min(cell_w, cell_h) * 0.35f);
+      }
     }
   }
-
-  cv::namedWindow("Environment", cv::WINDOW_NORMAL);
-  cv::resizeWindow("Environment", WINDOW_W, WINDOW_H);
-  cv::imshow("Environment", img);
-  cv::waitKey(1);
 }
 
 // ---------------------------------------------
@@ -127,8 +147,8 @@ void draw_environment(const Environment & env, const Robot & robot)
 class Simulator : public rclcpp::Node
 {
 public:
-  using Move        = bt_planner::action::Move;
-  using GoalHandle  = rclcpp_action::ServerGoalHandle<Move>;
+  using Move       = bt_planner::action::Move;
+  using GoalHandle = rclcpp_action::ServerGoalHandle<Move>;
 
   explicit Simulator(const std::string & env_path)
   : Node("simulator")
@@ -138,11 +158,8 @@ public:
       "Environment loaded: %dx%d, %zu obstacle(s).",
       env_.size_x, env_.size_y, env_.obstacles.size());
 
-    draw_environment(env_, robot_);
-
     action_server_ = rclcpp_action::create_server<Move>(
-      this,
-      "move",
+      this, "move",
       std::bind(&Simulator::handle_goal,     this, std::placeholders::_1, std::placeholders::_2),
       std::bind(&Simulator::handle_cancel,   this, std::placeholders::_1),
       std::bind(&Simulator::handle_accepted, this, std::placeholders::_1)
@@ -152,18 +169,24 @@ public:
     robot_.print_pose();
   }
 
+  // Called from the main render loop — thread-safe snapshot
+  void render(sf::RenderTarget & target)
+  {
+    std::lock_guard<std::mutex> lock(robot_mutex_);
+    render_environment(target, env_, robot_);
+  }
+
 private:
   Robot       robot_;
   Environment env_;
+  std::mutex  robot_mutex_;
   rclcpp_action::Server<Move>::SharedPtr action_server_;
 
-  // -- 1. Decide whether to accept the goal ----------------------------------
   rclcpp_action::GoalResponse handle_goal(
-    const rclcpp_action::GoalUUID & /*uuid*/,
+    const rclcpp_action::GoalUUID &,
     std::shared_ptr<const Move::Goal> goal)
   {
     const std::string & cmd = goal->command;
-
     if (cmd == "straight"  || cmd == "back"       ||
         cmd == "left"      || cmd == "right"       ||
         cmd == "turn_left" || cmd == "turn_right")
@@ -171,50 +194,85 @@ private:
       RCLCPP_INFO(this->get_logger(), "Goal accepted: '%s'", cmd.c_str());
       return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
     }
-
     RCLCPP_WARN(this->get_logger(), "Unknown command '%s' – rejecting.", cmd.c_str());
     return rclcpp_action::GoalResponse::REJECT;
   }
 
-  // -- 2. Handle cancel requests ---------------------------------------------
   rclcpp_action::CancelResponse handle_cancel(
-    const std::shared_ptr<GoalHandle> /*goal_handle*/)
+    const std::shared_ptr<GoalHandle>)
   {
-    RCLCPP_INFO(this->get_logger(), "Cancel request received.");
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
-  // -- 3. Execute the action in a detached thread ----------------------------
   void handle_accepted(const std::shared_ptr<GoalHandle> goal_handle)
   {
     std::thread{std::bind(&Simulator::execute, this, std::placeholders::_1),
                 goal_handle}.detach();
   }
 
+  // Direction vector for a given theta (grid coords: y increases upward)
+  static std::pair<int,int> direction(int theta)
+  {
+    switch (theta) {
+      case 0:   return { 0,  1};  // up
+      case 90:  return { 1,  0};  // right
+      case 180: return { 0, -1};  // down
+      default:  return {-1,  0};  // left (270)
+    }
+  }
+
   void execute(const std::shared_ptr<GoalHandle> goal_handle)
   {
     const std::string & cmd = goal_handle->get_goal()->command;
-
     RCLCPP_INFO(this->get_logger(), "[execute] command: '%s'", cmd.c_str());
 
-    // TODO: update robot_.x / y / theta based on cmd and grid logic
-    //       then call draw_environment(env_, robot_) to refresh the view
+    {
+      std::lock_guard<std::mutex> lock(robot_mutex_);
 
-    auto result    = std::make_shared<Move::Result>();
-    result->x      = robot_.x;
-    result->y      = robot_.y;
-    result->theta  = robot_.theta;
+      if (cmd == "turn_left") {
+        robot_.theta = (robot_.theta - 90 + 360) % 360;
+      } else if (cmd == "turn_right") {
+        robot_.theta = (robot_.theta + 90) % 360;
+      } else {
+        auto [dx, dy] = direction(robot_.theta);
 
+        if      (cmd == "back")  { dx = -dx; dy = -dy; }
+        else if (cmd == "left")  { std::swap(dx, dy); dx = -dx; }
+        else if (cmd == "right") { std::swap(dx, dy); dy = -dy; }
+        // "straight": dx/dy unchanged
+
+        int nx = robot_.x + dx;
+        int ny = robot_.y + dy;
+
+        bool in_bounds  = nx >= 0 && nx < env_.size_x &&
+                          ny >= 0 && ny < env_.size_y;
+        bool free_cell  = env_.obstacles.count({nx, ny}) == 0;
+
+        if (in_bounds && free_cell) {
+          robot_.x = nx;
+          robot_.y = ny;
+        } else {
+          RCLCPP_WARN(this->get_logger(),
+            "Move blocked at (%d,%d).", nx, ny);
+        }
+      }
+    }
+
+    robot_.print_pose();
+
+    auto result   = std::make_shared<Move::Result>();
+    {
+      std::lock_guard<std::mutex> lock(robot_mutex_);
+      result->x     = robot_.x;
+      result->y     = robot_.y;
+      result->theta = robot_.theta;
+    }
     goal_handle->succeed(result);
-
-    RCLCPP_INFO(this->get_logger(),
-      "[execute] succeeded. Pose: x=%d y=%d theta=%d",
-      robot_.x, robot_.y, robot_.theta);
   }
 };
 
 // ---------------------------------------------
-//  main
+//  main – SFML render loop + ROS2 spin_some
 // ---------------------------------------------
 int main(int argc, char * argv[])
 {
@@ -229,7 +287,24 @@ int main(int argc, char * argv[])
   }
 
   auto node = std::make_shared<Simulator>(env_path);
-  rclcpp::spin(node);
+
+  sf::RenderWindow window(
+    sf::VideoMode(WINDOW_W, WINDOW_H), "Robot Environment",
+    sf::Style::Titlebar | sf::Style::Close);
+  window.setFramerateLimit(30);
+
+  while (window.isOpen() && rclcpp::ok()) {
+    sf::Event event;
+    while (window.pollEvent(event)) {
+      if (event.type == sf::Event::Closed) window.close();
+    }
+
+    rclcpp::spin_some(node);
+
+    node->render(window);
+    window.display();
+  }
+
   rclcpp::shutdown();
   return 0;
 }

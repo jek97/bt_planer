@@ -10,9 +10,9 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-find_package(OpenCV REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(SFML 2.5 COMPONENTS graphics window system REQUIRED)
 
 # -- Generate the custom Move action ------------------------------------------
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -25,12 +25,17 @@ add_executable(simulator src/simulator.cpp)
 ament_target_dependencies(simulator
   rclcpp
   rclcpp_action
-  OpenCV
   ament_index_cpp
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(simulator "${cpp_typesupport_target}" ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
+target_link_libraries(simulator
+  "${cpp_typesupport_target}"
+  nlohmann_json::nlohmann_json
+  sfml-graphics
+  sfml-window
+  sfml-system
+)
 
 target_include_directories(simulator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

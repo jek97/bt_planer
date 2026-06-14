@@ -10,8 +10,8 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rosidl_default_runtime</depend>
-  <depend>libopencv-dev</depend>
   <depend>ament_index_cpp</depend>
+  <depend>libsfml-dev</depend>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
