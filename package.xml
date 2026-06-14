@@ -11,6 +11,7 @@
   <depend>rclcpp_action</depend>
   <depend>rosidl_default_runtime</depend>
   <depend>ament_index_cpp</depend>
+  <depend>behaviortree_cpp_v3</depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <depend>libsfml-dev</depend>
