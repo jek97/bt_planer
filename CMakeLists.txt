@@ -43,7 +43,19 @@ target_include_directories(simulator PUBLIC
 )
 target_compile_features(simulator PUBLIC c_std_99 cxx_std_17)
 
-install(TARGETS simulator
+add_executable(robot src/robot.cpp)
+
+ament_target_dependencies(robot
+  rclcpp
+  rclcpp_action
+)
+
+rosidl_get_typesupport_target(cpp_typesupport_target_robot ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(robot "${cpp_typesupport_target_robot}")
+
+target_compile_features(robot PUBLIC cxx_std_17)
+
+install(TARGETS simulator robot
   DESTINATION lib/${PROJECT_NAME}
 )
 
