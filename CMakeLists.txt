@@ -63,6 +63,10 @@ install(DIRECTORY environment/
   DESTINATION share/${PROJECT_NAME}/environment
 )
 
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+)
+
 # -- Tests ---------------------------------------------------------------------
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
