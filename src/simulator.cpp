@@ -71,8 +71,8 @@ public:
 // ---------------------------------------------
 //  Visualization
 // ---------------------------------------------
-static const int WINDOW_W = 600;
-static const int WINDOW_H = 600;
+static const int WINDOW_W = 1000;
+static const int WINDOW_H = 1000;
 
 void draw_environment(const Environment & env, const Robot & robot)
 {
