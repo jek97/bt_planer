@@ -115,6 +115,8 @@ void draw_environment(const Environment & env, const Robot & robot)
     }
   }
 
+  cv::namedWindow("Environment", cv::WINDOW_NORMAL);
+  cv::resizeWindow("Environment", WINDOW_W, WINDOW_H);
   cv::imshow("Environment", img);
   cv::waitKey(1);
 }
