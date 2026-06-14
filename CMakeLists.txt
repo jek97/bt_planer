@@ -12,6 +12,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 # -- Generate the custom Move action ------------------------------------------
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -25,6 +26,7 @@ ament_target_dependencies(simulator
   rclcpp
   rclcpp_action
   OpenCV
+  ament_index_cpp
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")

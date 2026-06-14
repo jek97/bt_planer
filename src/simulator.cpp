@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 using json = nlohmann::json;
 
@@ -217,9 +218,13 @@ int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
 
-  // Path to environment JSON (default: ../environment/env.json relative to binary)
-  std::string env_path = "environment/env.json";
-  if (argc >= 2) env_path = argv[1];
+  std::string env_path;
+  if (argc >= 2) {
+    env_path = argv[1];
+  } else {
+    env_path = ament_index_cpp::get_package_share_directory("bt_planner")
+               + "/environment/env.json";
+  }
 
   auto node = std::make_shared<Simulator>(env_path);
   rclcpp::spin(node);
