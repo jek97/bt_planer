@@ -37,72 +37,74 @@ def parse_environment(path):
 
 
 # =============================================================================
-#  A*  –  returns list of (x, y) waypoints or None if unreachable
+#  A*  –  state space is (x, y, theta) so turning cost is minimised too.
+#
+#  start : (x, y, theta)
+#  goal  : (x, y, theta)
+#
+#  Returns list[str] of action commands, or None if unreachable.
+#  Each action costs 1; heuristic = Manhattan distance (admissible).
 # =============================================================================
-_DIRS = [(0, 1), (1, 0), (0, -1), (-1, 0)]           # up, right, down, left
-_DELTA_TO_THETA = {(0, 1): 0, (1, 0): 90, (0, -1): 180, (-1, 0): 270}
+_THETA_TO_DIR = {0: (0, 1), 90: (1, 0), 180: (0, -1), 270: (-1, 0)}
 
 
 def _a_star(grid, size_x, size_y, start, goal):
-    def h(a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    import itertools
+    _seq = itertools.count()          # unique tie-breaker for the heap
 
-    open_heap = [(h(start, goal), start)]
-    came_from = {}
-    g = {start: 0}
+    def h(state):
+        # Manhattan distance on (x, y) – ignoring theta is still admissible
+        return abs(state[0] - goal[0]) + abs(state[1] - goal[1])
+
+    open_heap = [(h(start), next(_seq), start)]
+    came_from = {}          # state -> (parent_state, action_taken)
+    g         = {start: 0}
+    closed    = set()       # states whose optimal cost is known
 
     while open_heap:
-        _, cur = heapq.heappop(open_heap)
+        _, _, cur = heapq.heappop(open_heap)
+
+        if cur in closed:   # stale heap entry – skip
+            continue
+        closed.add(cur)
+
         if cur == goal:
-            path = []
+            # Reconstruct action sequence
+            actions = []
             while cur in came_from:
-                path.append(cur)
-                cur = came_from[cur]
-            path.append(start)
-            path.reverse()
-            return path
+                cur, action = came_from[cur]
+                actions.append(action)
+            actions.reverse()
+            return actions
 
-        cx, cy = cur
-        for dx, dy in _DIRS:
-            nx, ny = cx + dx, cy + dy
-            if not (0 <= nx < size_x and 0 <= ny < size_y):
-                continue
-            if grid[ny][nx] == 1:
-                continue
-            nbr = (nx, ny)
-            ng = g[cur] + 1
-            if ng < g.get(nbr, float('inf')):
-                came_from[nbr] = cur
+        x, y, theta = cur
+
+        # ── neighbour 1: turn_left ────────────────────────────────────────
+        nbr = (x, y, (theta - 90) % 360)
+        ng  = g[cur] + 1
+        if nbr not in closed and ng < g.get(nbr, float('inf')):
+            g[nbr] = ng
+            came_from[nbr] = (cur, 'turn_left')
+            heapq.heappush(open_heap, (ng + h(nbr), next(_seq), nbr))
+
+        # ── neighbour 2: turn_right ───────────────────────────────────────
+        nbr = (x, y, (theta + 90) % 360)
+        ng  = g[cur] + 1
+        if nbr not in closed and ng < g.get(nbr, float('inf')):
+            g[nbr] = ng
+            came_from[nbr] = (cur, 'turn_right')
+            heapq.heappush(open_heap, (ng + h(nbr), next(_seq), nbr))
+
+        # ── neighbour 3: straight ─────────────────────────────────────────
+        dx, dy = _THETA_TO_DIR[theta]
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < size_x and 0 <= ny < size_y and grid[ny][nx] == 0:
+            nbr = (nx, ny, theta)
+            ng  = g[cur] + 1
+            if nbr not in closed and ng < g.get(nbr, float('inf')):
                 g[nbr] = ng
-                heapq.heappush(open_heap, (ng + h(nbr, goal), nbr))
-
-    return None
-
-
-def _path_to_actions(path, start_theta):
-    """Convert (x,y) waypoints into ROS action command strings."""
-    actions = []
-    theta = start_theta
-
-    for i in range(len(path) - 1):
-        cx, cy = path[i]
-        nx, ny = path[i + 1]
-        target_theta = _DELTA_TO_THETA[(nx - cx, ny - cy)]
-
-        diff = (target_theta - theta) % 360
-        if diff == 90:
-            actions.append('turn_right')
-        elif diff == 180:
-            actions.append('turn_right')
-            actions.append('turn_right')
-        elif diff == 270:
-            actions.append('turn_left')
-        # diff == 0: already facing the right direction
-
-        theta = target_theta
-        actions.append('straight')
-
-    return actions
+                came_from[nbr] = (cur, 'straight')
+                heapq.heappush(open_heap, (ng + h(nbr), next(_seq), nbr))
 
 
 # =============================================================================
@@ -132,8 +134,8 @@ def _execute_one(command, client, logger):
 # =============================================================================
 #  go2A
 #  -----
-#  robot_x, robot_y, robot_theta  – current pose
-#  goal_x,  goal_y                – target cell
+#  robot_x, robot_y, robot_theta  – current pose (theta ∈ {0,90,180,270})
+#  goal_x,  goal_y,  goal_theta   – target pose
 #  sim                            – False: return action list only
 #                                   True:  also execute in the simulator
 #  grid, size_x, size_y           – occupancy map
@@ -141,22 +143,23 @@ def _execute_one(command, client, logger):
 #  Returns list[str] (action sequence) or None if no path exists.
 # =============================================================================
 def go2A(robot_x, robot_y, robot_theta,
-         goal_x, goal_y,
+         goal_x, goal_y, goal_theta,
          sim,
          node, client,
          grid, size_x, size_y):
 
     log = node.get_logger()
     log.info(f'go2A  start=({robot_x},{robot_y},θ={robot_theta})  '
-             f'goal=({goal_x},{goal_y})')
+             f'goal=({goal_x},{goal_y},θ={goal_theta})')
 
-    path = _a_star(grid, size_x, size_y, (robot_x, robot_y), (goal_x, goal_y))
-    if path is None:
+    actions = _a_star(grid, size_x, size_y,
+                      (robot_x, robot_y, robot_theta),
+                      (goal_x,  goal_y,  goal_theta))
+    if actions is None:
         log.error('go2A: A* found no path.')
         return None
 
-    actions = _path_to_actions(path, robot_theta)
-    log.info(f'go2A: {len(path)-1} cells, {len(actions)} actions → {actions}')
+    log.info(f'go2A: {len(actions)} actions → {actions}')
 
     if not sim:
         return actions
@@ -200,18 +203,18 @@ class Go2ABehaviour(py_trees.behaviour.Behaviour):
 
     def initialise(self):
         robot_pose = self._bb.robot_pose   # (x, y, theta)
-        goal_pose  = self._bb.goal_pose    # (x, y)
-        rx, ry, rtheta = robot_pose
-        gx, gy         = goal_pose
+        goal_pose  = self._bb.goal_pose    # (x, y, theta)
+        rx, ry, rtheta   = robot_pose
+        gx, gy, gtheta   = goal_pose
 
-        path = _a_star(self._grid, self._size_x, self._size_y,
-                       (rx, ry), (gx, gy))
-        if path is None:
+        actions = _a_star(self._grid, self._size_x, self._size_y,
+                          (rx, ry, rtheta), (gx, gy, gtheta))
+        if actions is None:
             self._node.get_logger().error('Go2A BT: no path found.')
             self._actions = None
             return
 
-        self._actions    = _path_to_actions(path, rtheta)
+        self._actions    = actions
         self._action_idx = 0
         self._node.get_logger().info(
             f'Go2A BT: plan ready – {len(self._actions)} actions.')
@@ -367,7 +370,7 @@ def main():
     # -------------------------------------------------------------------------
     go2A(
         robot_x=0, robot_y=0, robot_theta=0,
-        goal_x=9,  goal_y=9,
+        goal_x=9,  goal_y=9,  goal_theta=0,
         sim=True,
         node=node, client=node.client,
         grid=grid, size_x=size_x, size_y=size_y,
@@ -381,7 +384,7 @@ def main():
     # bb.register_key(key='robot_pose', access=py_trees.common.Access.WRITE)
     # bb.register_key(key='goal_pose',  access=py_trees.common.Access.WRITE)
     # bb.robot_pose = (0, 0, 0)
-    # bb.goal_pose  = (9, 9)
+    # bb.goal_pose  = (9, 9, 0)   # (x, y, theta)
     #
     # go2a_node = Go2ABehaviour('Go2A', node, node.client, grid, size_x, size_y)
     # bt = py_trees.trees.BehaviourTree(root=go2a_node)
