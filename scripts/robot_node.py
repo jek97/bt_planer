@@ -106,6 +106,197 @@ def _a_star(grid, size_x, size_y, start, goal):
                 came_from[nbr] = (cur, 'straight')
                 heapq.heappush(open_heap, (ng + h(nbr), next(_seq), nbr))
 
+    return None  # no path found
+
+
+# =============================================================================
+#  Straight-line path helpers
+# =============================================================================
+_DELTA_TO_THETA = {(0, 1): 0, (1, 0): 90, (0, -1): 180, (-1, 0): 270}
+
+
+def _bresenham_line(x0, y0, x1, y1):
+    """
+    Returns a 4-connected cell path along the straight line from
+    (x0,y0) to (x1,y1) using Bresenham's algorithm.
+    Diagonal steps are resolved by inserting an x-first intermediate cell.
+    """
+    # Generate raw Bresenham cells (may contain diagonal steps)
+    raw = [(x0, y0)]
+    dx, dy = abs(x1 - x0), abs(y1 - y0)
+    sx = 1 if x1 > x0 else -1
+    sy = 1 if y1 > y0 else -1
+    err = dx - dy
+    x, y = x0, y0
+    while (x, y) != (x1, y1):
+        e2 = 2 * err
+        step_x = step_y = False
+        if e2 > -dy:
+            err -= dy
+            x += sx
+            step_x = True
+        if e2 < dx:
+            err += dx
+            y += sy
+            step_y = True
+        if step_x and step_y:
+            raw.append((x - sx, y))   # x-first intermediate
+        raw.append((x, y))
+
+    # Deduplicate while preserving order
+    seen = set()
+    path = []
+    for cell in raw:
+        if cell not in seen:
+            seen.add(cell)
+            path.append(cell)
+    return path
+
+
+def _path_to_actions(path, start_theta):
+    """Convert a list of 4-connected (x,y) waypoints to action strings."""
+    actions = []
+    theta = start_theta
+    for i in range(len(path) - 1):
+        cx, cy = path[i]
+        nx, ny = path[i + 1]
+        target_theta = _DELTA_TO_THETA[(nx - cx, ny - cy)]
+        diff = (target_theta - theta) % 360
+        if diff == 90:
+            actions.append('turn_right')
+        elif diff == 180:
+            actions.append('turn_right')
+            actions.append('turn_right')
+        elif diff == 270:
+            actions.append('turn_left')
+        theta = target_theta
+        actions.append('straight')
+    return actions
+
+
+# =============================================================================
+#  go2Straight
+#  -----------
+#  Plans the path as the straight Bresenham line from start to goal,
+#  completely ignoring obstacles in the map.
+#
+#  robot_x, robot_y, robot_theta  – current pose
+#  goal_x,  goal_y                – target position (orientation ignored)
+#  sim                            – False: return action list only
+#                                   True:  execute in the simulator
+#
+#  Returns list[str] (action sequence).  Never returns None (line always exists).
+# =============================================================================
+def go2Straight(robot_x, robot_y, robot_theta,
+                goal_x, goal_y,
+                sim,
+                node, client,
+                grid, size_x, size_y):
+
+    log = node.get_logger()
+    log.info(f'go2Straight  start=({robot_x},{robot_y},θ={robot_theta})  '
+             f'goal=({goal_x},{goal_y})')
+
+    path    = _bresenham_line(robot_x, robot_y, goal_x, goal_y)
+    actions = _path_to_actions(path, robot_theta)
+    log.info(f'go2Straight: {len(path)-1} cells, {len(actions)} actions → {actions}')
+
+    if not sim:
+        return actions
+
+    for cmd in actions:
+        log.info(f'go2Straight: executing {cmd!r}')
+        if not _execute_one(cmd, client, log):
+            log.warn(f'go2Straight: {cmd!r} failed (obstacle hit) – aborting.')
+            return actions
+
+    log.info('go2Straight: goal reached.')
+    return actions
+
+
+# =============================================================================
+#  BT action node: Go2StraightBehaviour
+#  Reads robot_pose=(x,y,theta) and goal_pos=(x,y) from the blackboard.
+#  goal orientation is not used (straight line ignores it).
+#  Always runs with sim=True.  Non-blocking.
+# =============================================================================
+class Go2StraightBehaviour(py_trees.behaviour.Behaviour):
+
+    def __init__(self, name, node, client, grid, size_x, size_y):
+        super().__init__(name)
+        self._node    = node
+        self._client  = client
+        self._grid    = grid
+        self._size_x  = size_x
+        self._size_y  = size_y
+
+        bb = self.attach_blackboard_client(name=name)
+        bb.register_key(key='robot_pose', access=py_trees.common.Access.READ)
+        bb.register_key(key='goal_pos',   access=py_trees.common.Access.READ)  # (x, y)
+        self._bb = bb
+
+        self._actions       = None
+        self._action_idx    = 0
+        self._send_future   = None
+        self._goal_handle   = None
+        self._result_future = None
+
+    def initialise(self):
+        robot_pose = self._bb.robot_pose   # (x, y, theta)
+        goal_pos   = self._bb.goal_pos     # (x, y)
+        rx, ry, rtheta = robot_pose
+        gx, gy         = goal_pos
+
+        path             = _bresenham_line(rx, ry, gx, gy)
+        self._actions    = _path_to_actions(path, rtheta)
+        self._action_idx = 0
+        self._node.get_logger().info(
+            f'Go2Straight BT: {len(self._actions)} actions planned.')
+        self._fire_next()
+
+    def _fire_next(self):
+        goal = Move.Goal()
+        goal.command = self._actions[self._action_idx]
+        self._send_future   = self._client.send_goal_async(goal)
+        self._goal_handle   = None
+        self._result_future = None
+
+    def update(self):
+        if self._action_idx >= len(self._actions):
+            return py_trees.common.Status.SUCCESS
+
+        # Phase 1 – wait for goal acceptance
+        if self._goal_handle is None:
+            if not self._send_future.done():
+                return py_trees.common.Status.RUNNING
+            self._goal_handle = self._send_future.result()
+            if not self._goal_handle.accepted:
+                return py_trees.common.Status.FAILURE
+            self._result_future = self._goal_handle.get_result_async()
+            return py_trees.common.Status.RUNNING
+
+        # Phase 2 – wait for result
+        if not self._result_future.done():
+            return py_trees.common.Status.RUNNING
+
+        res = self._result_future.result().result
+        if not res.success:
+            self._node.get_logger().warn(
+                f'Go2Straight BT: {self._actions[self._action_idx]!r} blocked.')
+            return py_trees.common.Status.FAILURE
+
+        self._action_idx += 1
+        if self._action_idx < len(self._actions):
+            self._fire_next()
+            return py_trees.common.Status.RUNNING
+
+        self._node.get_logger().info('Go2Straight BT: goal reached.')
+        return py_trees.common.Status.SUCCESS
+
+    def terminate(self, new_status):
+        if self._goal_handle is not None:
+            self._goal_handle.cancel_goal_async()
+
 
 # =============================================================================
 #  Low-level helper: send one action and block until result.
@@ -365,20 +556,50 @@ def main():
     node.wait_for_server()
 
     # -------------------------------------------------------------------------
-    #  Run go2A directly with sim=True
+    #  Run go2Straight with sim=True
     #  Start: (0, 0, theta=0)   Goal: (9, 9)
     # -------------------------------------------------------------------------
-    go2A(
+    go2Straight(
         robot_x=0, robot_y=0, robot_theta=0,
-        goal_x=9,  goal_y=9,  goal_theta=0,
+        goal_x=9,  goal_y=9,
         sim=True,
         node=node, client=node.client,
         grid=grid, size_x=size_x, size_y=size_y,
     )
 
     # -------------------------------------------------------------------------
-    #  BT with Go2ABehaviour wired to blackboard – ready, but not active yet.
-    #  Uncomment this block to drive navigation through the behaviour tree.
+    #  go2A  (commented out – use go2Straight above for now)
+    # -------------------------------------------------------------------------
+    # go2A(
+    #     robot_x=0, robot_y=0, robot_theta=0,
+    #     goal_x=9,  goal_y=9,  goal_theta=0,
+    #     sim=True,
+    #     node=node, client=node.client,
+    #     grid=grid, size_x=size_x, size_y=size_y,
+    # )
+
+    # -------------------------------------------------------------------------
+    #  BT with Go2StraightBehaviour wired to blackboard – ready, not active.
+    #  Uncomment to drive straight-line navigation through the behaviour tree.
+    # -------------------------------------------------------------------------
+    # bb = py_trees.blackboard.Client(name='main')
+    # bb.register_key(key='robot_pose', access=py_trees.common.Access.WRITE)
+    # bb.register_key(key='goal_pos',   access=py_trees.common.Access.WRITE)
+    # bb.robot_pose = (0, 0, 0)
+    # bb.goal_pos   = (9, 9)
+    #
+    # go2s_node = Go2StraightBehaviour(
+    #     'Go2Straight', node, node.client, grid, size_x, size_y)
+    # bt = py_trees.trees.BehaviourTree(root=go2s_node)
+    # while rclpy.ok():
+    #     bt.tick()
+    #     if go2s_node.status in (py_trees.common.Status.SUCCESS,
+    #                             py_trees.common.Status.FAILURE):
+    #         break
+    #     time.sleep(0.05)
+
+    # -------------------------------------------------------------------------
+    #  BT with Go2ABehaviour – ready, not active.
     # -------------------------------------------------------------------------
     # bb = py_trees.blackboard.Client(name='main')
     # bb.register_key(key='robot_pose', access=py_trees.common.Access.WRITE)
