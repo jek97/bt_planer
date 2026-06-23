@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import heapq
 import json
 import os
 import sys
@@ -16,9 +17,9 @@ from ament_index_python.packages import get_package_share_directory
 from bt_planner.action import Move
 
 
-# ---------------------------------------------
-#  Environment parsing  (grid[y][x]: 0=free, 1=obstacle)
-# ---------------------------------------------
+# =============================================================================
+#  Environment parsing  –  grid[y][x]: 0 = free, 1 = obstacle
+# =============================================================================
 def parse_environment(path):
     with open(path) as f:
         data = json.load(f)
@@ -35,80 +36,285 @@ def parse_environment(path):
     return size_x, size_y, grid
 
 
-# ---------------------------------------------
-#  BT leaf: MoveCommand  (StatefulActionNode equivalent)
-# ---------------------------------------------
-class MoveCommand(py_trees.behaviour.Behaviour):
-    def __init__(self, name, command, node, client):
+# =============================================================================
+#  A*  –  returns list of (x, y) waypoints or None if unreachable
+# =============================================================================
+_DIRS = [(0, 1), (1, 0), (0, -1), (-1, 0)]           # up, right, down, left
+_DELTA_TO_THETA = {(0, 1): 0, (1, 0): 90, (0, -1): 180, (-1, 0): 270}
+
+
+def _a_star(grid, size_x, size_y, start, goal):
+    def h(a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    open_heap = [(h(start, goal), start)]
+    came_from = {}
+    g = {start: 0}
+
+    while open_heap:
+        _, cur = heapq.heappop(open_heap)
+        if cur == goal:
+            path = []
+            while cur in came_from:
+                path.append(cur)
+                cur = came_from[cur]
+            path.append(start)
+            path.reverse()
+            return path
+
+        cx, cy = cur
+        for dx, dy in _DIRS:
+            nx, ny = cx + dx, cy + dy
+            if not (0 <= nx < size_x and 0 <= ny < size_y):
+                continue
+            if grid[ny][nx] == 1:
+                continue
+            nbr = (nx, ny)
+            ng = g[cur] + 1
+            if ng < g.get(nbr, float('inf')):
+                came_from[nbr] = cur
+                g[nbr] = ng
+                heapq.heappush(open_heap, (ng + h(nbr, goal), nbr))
+
+    return None
+
+
+def _path_to_actions(path, start_theta):
+    """Convert (x,y) waypoints into ROS action command strings."""
+    actions = []
+    theta = start_theta
+
+    for i in range(len(path) - 1):
+        cx, cy = path[i]
+        nx, ny = path[i + 1]
+        target_theta = _DELTA_TO_THETA[(nx - cx, ny - cy)]
+
+        diff = (target_theta - theta) % 360
+        if diff == 90:
+            actions.append('turn_right')
+        elif diff == 180:
+            actions.append('turn_right')
+            actions.append('turn_right')
+        elif diff == 270:
+            actions.append('turn_left')
+        # diff == 0: already facing the right direction
+
+        theta = target_theta
+        actions.append('straight')
+
+    return actions
+
+
+# =============================================================================
+#  Low-level helper: send one action and block until result.
+#  Safe to call from any thread while the background executor is running.
+# =============================================================================
+def _execute_one(command, client, logger):
+    goal = Move.Goal()
+    goal.command = command
+    send_future = client.send_goal_async(goal)
+
+    while not send_future.done():
+        time.sleep(0.01)
+
+    goal_handle = send_future.result()
+    if not goal_handle.accepted:
+        logger.error(f'_execute_one: goal {command!r} rejected.')
+        return False
+
+    result_future = goal_handle.get_result_async()
+    while not result_future.done():
+        time.sleep(0.01)
+
+    return result_future.result().result.success
+
+
+# =============================================================================
+#  go2A
+#  -----
+#  robot_x, robot_y, robot_theta  – current pose
+#  goal_x,  goal_y                – target cell
+#  sim                            – False: return action list only
+#                                   True:  also execute in the simulator
+#  grid, size_x, size_y           – occupancy map
+#
+#  Returns list[str] (action sequence) or None if no path exists.
+# =============================================================================
+def go2A(robot_x, robot_y, robot_theta,
+         goal_x, goal_y,
+         sim,
+         node, client,
+         grid, size_x, size_y):
+
+    log = node.get_logger()
+    log.info(f'go2A  start=({robot_x},{robot_y},θ={robot_theta})  '
+             f'goal=({goal_x},{goal_y})')
+
+    path = _a_star(grid, size_x, size_y, (robot_x, robot_y), (goal_x, goal_y))
+    if path is None:
+        log.error('go2A: A* found no path.')
+        return None
+
+    actions = _path_to_actions(path, robot_theta)
+    log.info(f'go2A: {len(path)-1} cells, {len(actions)} actions → {actions}')
+
+    if not sim:
+        return actions
+
+    for cmd in actions:
+        log.info(f'go2A: executing {cmd!r}')
+        if not _execute_one(cmd, client, log):
+            log.warn(f'go2A: {cmd!r} failed – aborting.')
+            return actions
+
+    log.info('go2A: goal reached.')
+    return actions
+
+
+# =============================================================================
+#  BT action node: Go2ABehaviour
+#  Reads robot_pose=(x,y,theta) and goal_pose=(x,y) from the blackboard.
+#  Always runs with sim=True (executes every action in the simulator).
+#  Non-blocking: fires one ROS action at a time and polls futures.
+# =============================================================================
+class Go2ABehaviour(py_trees.behaviour.Behaviour):
+
+    def __init__(self, name, node, client, grid, size_x, size_y):
         super().__init__(name)
-        self._command = command
         self._node    = node
         self._client  = client
-        # futures reset on each initialise()
+        self._grid    = grid
+        self._size_x  = size_x
+        self._size_y  = size_y
+
+        bb = self.attach_blackboard_client(name=name)
+        bb.register_key(key='robot_pose', access=py_trees.common.Access.READ)
+        bb.register_key(key='goal_pose',  access=py_trees.common.Access.READ)
+        self._bb = bb
+
+        self._actions       = None
+        self._action_idx    = 0
         self._send_future   = None
         self._goal_handle   = None
         self._result_future = None
 
     def initialise(self):
-        """Called once when the node transitions to RUNNING."""
+        robot_pose = self._bb.robot_pose   # (x, y, theta)
+        goal_pose  = self._bb.goal_pose    # (x, y)
+        rx, ry, rtheta = robot_pose
+        gx, gy         = goal_pose
+
+        path = _a_star(self._grid, self._size_x, self._size_y,
+                       (rx, ry), (gx, gy))
+        if path is None:
+            self._node.get_logger().error('Go2A BT: no path found.')
+            self._actions = None
+            return
+
+        self._actions    = _path_to_actions(path, rtheta)
+        self._action_idx = 0
+        self._node.get_logger().info(
+            f'Go2A BT: plan ready – {len(self._actions)} actions.')
+        self._fire_next()
+
+    def _fire_next(self):
+        goal = Move.Goal()
+        goal.command = self._actions[self._action_idx]
+        self._send_future   = self._client.send_goal_async(goal)
         self._goal_handle   = None
         self._result_future = None
-        goal = Move.Goal()
-        goal.command = self._command
-        self._send_future = self._client.send_goal_async(goal)
-        self._node.get_logger().info(f'[BT] Sending: {self._command!r}')
 
     def update(self):
-        """Called every tick while RUNNING — never blocks."""
-        # Phase 1: wait for server to accept/reject the goal
+        if self._actions is None:
+            return py_trees.common.Status.FAILURE
+
+        if self._action_idx >= len(self._actions):
+            return py_trees.common.Status.SUCCESS
+
+        # Phase 1 – wait for goal acceptance
         if self._goal_handle is None:
             if not self._send_future.done():
                 return py_trees.common.Status.RUNNING
             self._goal_handle = self._send_future.result()
             if not self._goal_handle.accepted:
-                self._node.get_logger().error(
-                    f'Goal {self._command!r} rejected.')
                 return py_trees.common.Status.FAILURE
             self._result_future = self._goal_handle.get_result_async()
             return py_trees.common.Status.RUNNING
 
-        # Phase 2: wait for the action to complete
+        # Phase 2 – wait for result
         if not self._result_future.done():
             return py_trees.common.Status.RUNNING
 
         res = self._result_future.result().result
-        self._node.get_logger().info(
-            f'[BT] {self._command!r} -> '
-            f'x:{res.x} y:{res.y} theta:{res.theta} success:{res.success}'
-        )
-        return (py_trees.common.Status.SUCCESS if res.success
-                else py_trees.common.Status.FAILURE)
+        if not res.success:
+            self._node.get_logger().warn(
+                f'Go2A BT: {self._actions[self._action_idx]!r} failed.')
+            return py_trees.common.Status.FAILURE
+
+        self._action_idx += 1
+        if self._action_idx < len(self._actions):
+            self._fire_next()
+            return py_trees.common.Status.RUNNING
+
+        self._node.get_logger().info('Go2A BT: goal reached.')
+        return py_trees.common.Status.SUCCESS
 
     def terminate(self, new_status):
-        """Cancel in-flight goal if the BT halts this node."""
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
 
 
-# ---------------------------------------------
-#  BT tree definition
-# ---------------------------------------------
-def build_tree(node, client):
-    sequence = py_trees.composites.Sequence(name='MoveSequence', memory=True)
-    for name, cmd in [
-        ('Straight1',  'straight'),
-        ('TurnRight',  'turn_right'),
-        ('Straight2',  'straight'),
-        ('TurnLeft',   'turn_left'),
-        ('Straight3',  'straight'),
-    ]:
-        sequence.add_child(MoveCommand(name, cmd, node, client))
-    return sequence
+# =============================================================================
+#  Old fixed-sequence BT  (commented out – kept for reference)
+# =============================================================================
+# class MoveCommand(py_trees.behaviour.Behaviour):
+#     def __init__(self, name, command, node, client):
+#         super().__init__(name)
+#         self._command = command
+#         self._node    = node
+#         self._client  = client
+#         self._send_future = self._goal_handle = self._result_future = None
+#
+#     def initialise(self):
+#         self._goal_handle = self._result_future = None
+#         goal = Move.Goal()
+#         goal.command = self._command
+#         self._send_future = self._client.send_goal_async(goal)
+#
+#     def update(self):
+#         if self._goal_handle is None:
+#             if not self._send_future.done():
+#                 return py_trees.common.Status.RUNNING
+#             self._goal_handle = self._send_future.result()
+#             if not self._goal_handle.accepted:
+#                 return py_trees.common.Status.FAILURE
+#             self._result_future = self._goal_handle.get_result_async()
+#             return py_trees.common.Status.RUNNING
+#         if not self._result_future.done():
+#             return py_trees.common.Status.RUNNING
+#         res = self._result_future.result().result
+#         return (py_trees.common.Status.SUCCESS if res.success
+#                 else py_trees.common.Status.FAILURE)
+#
+#     def terminate(self, new_status):
+#         if self._goal_handle is not None:
+#             self._goal_handle.cancel_goal_async()
+#
+#
+# def build_tree(node, client):
+#     sequence = py_trees.composites.Sequence(name='MoveSequence', memory=True)
+#     for name, cmd in [
+#         ('Straight1', 'straight'), ('TurnRight', 'turn_right'),
+#         ('Straight2', 'straight'), ('TurnLeft',  'turn_left'),
+#         ('Straight3', 'straight'),
+#     ]:
+#         sequence.add_child(MoveCommand(name, cmd, node, client))
+#     return sequence
 
 
-# ---------------------------------------------
+# =============================================================================
 #  Robot ROS2 node
-# ---------------------------------------------
+# =============================================================================
 class RobotNode(Node):
     def __init__(self):
         super().__init__('robot')
@@ -124,9 +330,9 @@ class RobotNode(Node):
         return self._client
 
 
-# ---------------------------------------------
+# =============================================================================
 #  main
-# ---------------------------------------------
+# =============================================================================
 def main():
     rclpy.init()
 
@@ -147,7 +353,7 @@ def main():
             ''.join('X' if grid[row][col] else '.' for col in range(size_x))
         )
 
-    # Spin ROS2 in a background thread so BT ticks are non-blocking
+    # Spin ROS2 in a background thread so futures are resolved without blocking
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
@@ -155,25 +361,36 @@ def main():
 
     node.wait_for_server()
 
-    sequence = build_tree(node, node.client)
-    bt = py_trees.trees.BehaviourTree(root=sequence)
+    # -------------------------------------------------------------------------
+    #  Run go2A directly with sim=True
+    #  Start: (0, 0, theta=0)   Goal: (9, 9)
+    # -------------------------------------------------------------------------
+    go2A(
+        robot_x=0, robot_y=0, robot_theta=0,
+        goal_x=9,  goal_y=9,
+        sim=True,
+        node=node, client=node.client,
+        grid=grid, size_x=size_x, size_y=size_y,
+    )
 
-    node.get_logger().info('Behavior tree running...')
-
-    while rclpy.ok():
-        bt.tick()
-        status = sequence.status
-
-        if status == py_trees.common.Status.FAILURE:
-            node.get_logger().warn('Sequence failed — stopping.')
-            break
-
-        if status == py_trees.common.Status.SUCCESS:
-            node.get_logger().info('Sequence complete, repeating...')
-            # Reset all children so initialise() is called again next tick
-            sequence.stop(py_trees.common.Status.INVALID)
-
-        time.sleep(0.05)  # 20 Hz tick rate
+    # -------------------------------------------------------------------------
+    #  BT with Go2ABehaviour wired to blackboard – ready, but not active yet.
+    #  Uncomment this block to drive navigation through the behaviour tree.
+    # -------------------------------------------------------------------------
+    # bb = py_trees.blackboard.Client(name='main')
+    # bb.register_key(key='robot_pose', access=py_trees.common.Access.WRITE)
+    # bb.register_key(key='goal_pose',  access=py_trees.common.Access.WRITE)
+    # bb.robot_pose = (0, 0, 0)
+    # bb.goal_pose  = (9, 9)
+    #
+    # go2a_node = Go2ABehaviour('Go2A', node, node.client, grid, size_x, size_y)
+    # bt = py_trees.trees.BehaviourTree(root=go2a_node)
+    # while rclpy.ok():
+    #     bt.tick()
+    #     if go2a_node.status in (py_trees.common.Status.SUCCESS,
+    #                             py_trees.common.Status.FAILURE):
+    #         break
+    #     time.sleep(0.05)
 
     rclpy.shutdown()
 
