@@ -7,30 +7,31 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     env_file_arg = DeclareLaunchArgument(
-        "env_file",
+        'env_file',
         default_value=PathJoinSubstitution(
-            [FindPackageShare("bt_planner"), "environment", "env.json"]
+            [FindPackageShare('bt_planner'), 'environment', 'env.json']
         ),
-        description="Absolute path to the environment JSON file",
+        description='Absolute path to the environment JSON file',
     )
 
     simulator_node = Node(
-        package="bt_planner",
-        executable="simulator",
-        name="simulator",
-        arguments=[LaunchConfiguration("env_file")],
-        output="screen",
+        package='bt_planner',
+        executable='simulator_node.py',
+        name='simulator',
+        arguments=[LaunchConfiguration('env_file')],
+        output='screen',
     )
 
-    # Delay the robot node to give the simulator time to start its action server
+    # Delay robot node to give the simulator time to start its action server
     robot_node = TimerAction(
         period=2.0,
         actions=[
             Node(
-                package="bt_planner",
-                executable="robot",
-                name="robot",
-                output="screen",
+                package='bt_planner',
+                executable='robot_node.py',
+                name='robot',
+                arguments=[LaunchConfiguration('env_file')],
+                output='screen',
             )
         ],
     )

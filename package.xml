@@ -7,19 +7,20 @@
   <maintainer email="jek.lugano@yahoo.com">glugano</maintainer>
   <license>Apache-2.0</license>
 
-  <depend>rclcpp</depend>
-  <depend>rclcpp_action</depend>
-  <depend>rosidl_default_runtime</depend>
-  <depend>ament_index_cpp</depend>
-  <depend>behaviortree_cpp</depend>
-  <exec_depend>ros2launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
-  <depend>libsfml-dev</depend>
-
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
+  <depend>rclpy</depend>
+  <depend>rosidl_default_runtime</depend>
+  <depend>ament_index_python</depend>
+  <depend>python3-pygame</depend>
+  <depend>python3-py-trees</depend>
+
   <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
