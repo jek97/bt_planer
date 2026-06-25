@@ -556,23 +556,23 @@ def main():
     node.wait_for_server()
 
     # -------------------------------------------------------------------------
-    #  Run go2Straight with sim=True
-    #  Start: (0, 0, theta=0)   Goal: (9, 9)
+    #  Run go2A with sim=True  (A* planner, obstacle-aware)
+    #  Start: (0, 0, theta=0)   Goal: (19, 19, theta=0)
     # -------------------------------------------------------------------------
-    go2Straight(
+    go2A(
         robot_x=0, robot_y=0, robot_theta=0,
-        goal_x=9,  goal_y=9,
+        goal_x=19, goal_y=19, goal_theta=0,
         sim=True,
         node=node, client=node.client,
         grid=grid, size_x=size_x, size_y=size_y,
     )
 
     # -------------------------------------------------------------------------
-    #  go2A  (commented out – use go2Straight above for now)
+    #  go2Straight  (commented out)
     # -------------------------------------------------------------------------
-    # go2A(
+    # go2Straight(
     #     robot_x=0, robot_y=0, robot_theta=0,
-    #     goal_x=9,  goal_y=9,  goal_theta=0,
+    #     goal_x=19, goal_y=19,
     #     sim=True,
     #     node=node, client=node.client,
     #     grid=grid, size_x=size_x, size_y=size_y,
